@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QuizBlast Host</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-white min-h-screen">
+  <div class="max-w-7xl mx-auto px-4 py-6">
+    <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-6">
+      <div>
+        <div class="text-slate-400 text-sm">Host Dashboard</div>
+        <h1 class="text-3xl font-bold">QuizBlast Oda Yönetimi</h1>
+      </div>
+      <div class="bg-slate-800 px-4 py-3 rounded-2xl">
+        Oda Kodu: <span id="roomCode" class="font-bold text-blue-400">Henüz yok</span>
+      </div>
+    </div>
+
+    <div class="bg-slate-900 rounded-3xl p-6 shadow-xl mb-6">
+      <h2 class="text-xl font-bold mb-4">Yeni Oda Oluştur</h2>
+      <div class="grid md:grid-cols-2 gap-4">
+        <input id="hostName" class="rounded-2xl p-4 text-slate-900" placeholder="Host adı" />
+        <button onclick="createRoom()" class="bg-blue-600 hover:bg-blue-500 rounded-2xl p-4">Oda Oluştur</button>
+      </div>
+    </div>
+
+    <div class="grid xl:grid-cols-3 gap-6">
+      <div class="xl:col-span-2 space-y-6">
+        <div class="bg-slate-900 rounded-3xl p-6 shadow-xl">
+          <h2 class="text-xl font-bold mb-4">Oyun Kontrolleri</h2>
+          <div class="grid md:grid-cols-2 gap-4">
+            <button onclick="startQuiz()" class="bg-blue-600 hover:bg-blue-500 rounded-2xl p-4">Quizi Başlat</button>
+            <button onclick="nextQuestion()" class="bg-violet-600 hover:bg-violet-500 rounded-2xl p-4">Sonraki Soru</button>
+            <button onclick="showAnswer()" class="bg-emerald-600 hover:bg-emerald-500 rounded-2xl p-4">Doğru Cevabı Göster</button>
+            <button onclick="restartQuiz()" class="bg-rose-600 hover:bg-rose-500 rounded-2xl p-4">Quizi Sıfırla</button>
+          </div>
+        </div>
+
+        <div class="bg-slate-900 rounded-3xl p-6 shadow-xl">
+          <div class="text-slate-400 text-sm mb-2">Aktif Soru</div>
+          <div id="questionText" class="text-2xl font-bold mb-4">Yükleniyor...</div>
+          <ul id="optionsList" class="space-y-3 text-slate-200"></ul>
+        </div>
+
+        <div class="bg-slate-900 rounded-3xl p-6 shadow-xl">
+          <h2 class="text-xl font-bold mb-4">Cevap Dağılımı</h2>
+          <ul id="statsList" class="space-y-3"></ul>
+        </div>
+      </div>
+
+      <div class="space-y-6">
+        <div class="bg-slate-900 rounded-3xl p-6 shadow-xl">
+          <h2 class="text-xl font-bold mb-4">Oda Skor Tablosu</h2>
+          <ul id="leaderboardList" class="space-y-3"></ul>
+        </div>
+
+        <div class="bg-slate-900 rounded-3xl p-6 shadow-xl">
+          <h2 class="text-xl font-bold mb-4">Durum</h2>
+          <div id="statusBox" class="text-slate-300">Henüz oda oluşturulmadı.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let ws = null;
+    let currentRoomCode = "";
+
+    function setStatus(msg) {
+      document.getElementById("statusBox").innerText = msg;
+      console.log("[HOST]", msg);
+    }
+
+    async function createRoom() {
+      const hostName = document.getElementById("hostName").value.trim();
+      if (!hostName) {
+        alert("Host adı gerekli.");
+        return;
+      }
+
+      const res = await fetch("/api/rooms", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ host_name: hostName })
+      });
+
+      const data = await res.json();
+
+      if (!data.ok) {
+        setStatus(data.message || "Oda oluşturulamadı.");
+        return;
+      }
+
+      currentRoomCode = data.room_code;
+      document.getElementById("roomCode").innerText = currentRoomCode;
+      setStatus("Oda oluşturuldu: " + currentRoomCode);
+      connectWS();
+    }
+
+    function connectWS() {
+      if (!currentRoomCode) {
+        setStatus("Önce oda oluştur.");
+        return;
+      }
+
+      const protocol = location.protocol === "https:" ? "wss" : "ws";
+      const wsUrl = `${protocol}://${location.host}/ws/${currentRoomCode}`;
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+
+      setStatus("Bağlantı kuruluyor...");
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        setStatus("Host panel bağlandı. Oda: " + currentRoomCode);
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        console.log("[HOST MESSAGE]", msg);
+
+        if (msg.type === "question") showQuestion(msg.data);
+        if (msg.type === "leaderboard") renderLeaderboard(msg.players);
+
+        if (msg.type === "host_answer_info") {
+          setStatus(msg.player + " cevap verdi: " + msg.answer + (msg.correct ? " (Doğru)" : " (Yanlış)"));
+        }
+
+        if (msg.type === "answer_stats") renderStats(msg.counts, msg.correct_answer);
+        if (msg.type === "question_closed") setStatus("Soru kapandı. Doğru cevap: " + msg.correct_answer);
+        if (msg.type === "info") setStatus(msg.message);
+        if (msg.type === "quiz_finished") setStatus("Quiz tamamlandı.");
+      };
+
+      ws.onerror = (err) => {
+        console.error("[HOST WS ERROR]", err);
+        setStatus("WebSocket hatası oluştu.");
+      };
+
+      ws.onclose = () => {
+        setStatus("Bağlantı koptu.");
+      };
+    }
+
+    function showQuestion(q) {
+      document.getElementById("questionText").innerText = q.question;
+      const ul = document.getElementById("optionsList");
+      ul.innerHTML = "";
+      q.options.forEach((opt, i) => {
+        const li = document.createElement("li");
+        li.className = "bg-slate-800 rounded-2xl px-4 py-3";
+        li.innerText = String.fromCharCode(65 + i) + ") " + opt;
+        ul.appendChild(li);
+      });
+    }
+
+    function renderLeaderboard(players) {
+      const ul = document.getElementById("leaderboardList");
+      ul.innerHTML = "";
+      const entries = Object.entries(players).sort((a, b) => b[1] - a[1]);
+      entries.forEach(([name, score], index) => {
+        const li = document.createElement("li");
+        li.className = "flex items-center justify-between bg-slate-800 rounded-xl px-4 py-3";
+        li.innerHTML = `<div>${index + 1}. ${name}</div><div class="bg-blue-600 rounded-lg px-3 py-1 text-sm">${score} puan</div>`;
+        ul.appendChild(li);
+      });
+    }
+
+    function renderStats(counts, correctAnswer) {
+      const ul = document.getElementById("statsList");
+      ul.innerHTML = "";
+      ["A", "B", "C", "D"].forEach(letter => {
+        const li = document.createElement("li");
+        li.className = "flex items-center justify-between bg-slate-800 rounded-xl px-4 py-3";
+        li.innerHTML = `<div>${letter} seçeneği</div><div>${counts[letter]} ${letter === correctAnswer ? "✅" : ""}</div>`;
+        ul.appendChild(li);
+      });
+    }
+
+    function safeSend(payload, statusMessage) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        setStatus("Bağlantı hazır değil.");
+        return;
+      }
+      ws.send(JSON.stringify(payload));
+      if (statusMessage) setStatus(statusMessage);
+    }
+
+    function startQuiz() { safeSend({ type: "start_quiz" }, "Quiz başlatıldı."); }
+    function nextQuestion() { safeSend({ type: "next_question" }, "Sonraki soru gönderildi."); }
+    function showAnswer() { safeSend({ type: "show_answer" }, "Doğru cevap gösterildi."); }
+    function restartQuiz() { safeSend({ type: "restart_quiz" }, "Quiz sıfırlandı."); }
+  </script>
+</body>
+</html>
